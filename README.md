@@ -35,15 +35,18 @@ git clone https://github.com/woozheng/aicp_cli.git && cd aicp_cli
 # 2. 安装依赖（最少依赖）
 pip install -r requirements.txt
 
-# 3、开始你的需求
-# edit aicp.yaml,填写 model 和 api-key
 
-# 4、运行
+# 3、运行
 # windows 
 aicp  
 
 # linux&Mac
 python aicp.py
+
+# 4.第一次运行自动生成配置 aicp.yaml
+
+# edit aicp.yaml,填写 model 和 api-key. 填写完成，再次运行 # 3
+
 
 ```
 
