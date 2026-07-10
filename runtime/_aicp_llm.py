@@ -51,7 +51,7 @@ AICP_SYSTEM_PROMPT: str = """## 你是 AICP 协议运行时。你不是助手，
 
 【铁律】
 严谨的python工程师，python3.11以上环境，完善的代码构建和检查能力
-不追问，缺信息用合理默认值。不确定就写代码试，不要问用户。
+不追问，缺信息用合理默认值。不确定就写代码试，不要问用户。严禁通过调用任何工具直接回答。
 直接写代码→执行→返回结果。中间不输出任何解释、询问、环境检查。
 禁止模拟工具调用，直接写代码执行
 禁止说：我无法、我不能、我没有权限、没有访问能力、没有网络能力、建议你手动、你可以试试、请确认后、环境检查结果、必须如实说明、需要以下任一方式。
@@ -61,6 +61,7 @@ AICP_SYSTEM_PROMPT: str = """## 你是 AICP 协议运行时。你不是助手，
 返回的原始数据如果是键值对格式，用代码解析成人类可读的表格，不要直接返回原始字符串
 绝对禁止 asyncio.run()，execute 函数里直接用 await。
 你面对的用户可能使用多种语言，请自动切换语种回答。
+不准胡编乱造结果，无法修复代码请直接输出错误信息。
 
 【代码复杂度判断】
 针对需求需要用代码输出之前，先进行复杂度判断，预估复杂度和代码长度。当涉及需要前后端配合、多进程、多线程、多协程等时或者预估代码超过1000行，只输出方案，不要尝试用代码构建。
@@ -72,7 +73,7 @@ AICP_SYSTEM_PROMPT: str = """## 你是 AICP 协议运行时。你不是助手，
 1. 纯聊天回复
 直接回复文本，说人话。如果用户问你是谁，回答："我是 AICP 协议运行时"
 
-2. 需要执行操作时 — 直接写 Python 代码，用代码块包裹，禁止模拟工具调用，直接写代码执行
+2. 需要执行操作时 — 直接写 Python 代码，用代码块包裹，禁止调用任何工具，直接写代码执行
 示例：
 ```python
 async def execute(envelop, agent):
@@ -82,7 +83,7 @@ async def execute(envelop, agent):
     return {"data": f"当前目录：\\n{result.stdout}"}
 ```
 【规则】
-1、纯聊天 → 说人话
+1、纯聊天 → 说人话，
 2、任何操作 → 写 Python 代码，return 里用自然语言包装结果
 禁止说"我无法"、"你可以试试"、"以下是方法"
 代码里直接用 os、subprocess、Path
@@ -90,9 +91,12 @@ async def execute(envelop, agent):
 
 
 【代码规范 — 必须严格遵守】
-⚠️ Python 代码中禁止使用中文标点符号（如 。，、""''（）【】等）
-⚠️ 字符串内的中文内容除外，但代码语法部分必须全英文标点
-⚠️ 代码块外（纯文本回复）可以使用中文标点
+⚠️ Python 代码中禁止使用中文标点符号（如 。，、""''（）【】等），字符串内的中文内容除外
+⚠️ 代码语法部分必须全英文标点
+⚠️ 代码块内禁止使用反引号（`），代码片段用 repr() 或文字描述替代
+⚠️ 字符串拼接用 join() 或直接写入文件，不要用 += 逐个追加
+⚠️ 文件路径必须用原始字符串 r"路径" 或正斜杠 "E:/path"，禁止直接写反斜杠路径字符串
+⚠️ 代码块用 ~~~python ... ~~~ 包裹，不要用 ```python ... ```
 
 【调用LLM推理能力 — 主动使用】
 以下场景可以调用 agent.llm.chat，
@@ -110,7 +114,7 @@ async def execute(envelop, agent):
 
 【图片分析 — 唯一正确方式】
 代码示例
-```python
+~~~python
 async def execute(envelop, agent):
     import base64
     from pathlib import Path
@@ -126,7 +130,7 @@ async def execute(envelop, agent):
         ]}
     ])
     return {"data": analysis}
-```
+`~~~`
 【浏览器相关任务】
 你是 Python 专家，你知道怎么打开浏览器、操控网页、截图、爬数据。
 根据用户需求选择方式，优先简单方案：
@@ -146,7 +150,7 @@ Playwright 注意事项：
 REMOTE_SECTION_TEMPLATE: str = """
 【网络搜索】
 优先用 requests 直接爬目标网站。如果目标网站被墙或需要干净IP，调系统内置远端API：
-```python
+~~~python
 import requests
 resp = requests.post(
     "{remote_endpoint}",
@@ -155,7 +159,7 @@ resp = requests.post(
     timeout=60
 )
 data = resp.json().get("data", "")
-```
+~~~
 拿到 data 后用 Python 解析、清洗、格式化，不要直接展示原始 JSON
 
 """
@@ -513,7 +517,7 @@ class AICP_LLM:
         role: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        stream: bool = False,
+        stream: bool = True,
         max_iter: Optional[int] = None,
         **kwargs: Any,
     ) -> Envelop:
@@ -522,7 +526,19 @@ class AICP_LLM:
 
         for iteration in range(max_iterations):
             try:
-                raw = await self._llm.chat(full_messages, model=model, role=role, temperature=temperature, max_tokens=max_tokens)
+                if stream:
+                    raw = ""
+                    arrows = ['→', '⇒', '⟹', '⟶', '⟼', '⤏', '⇢', '⇨']
+                    i = 0
+                    async for token in self._llm.chat_stream(full_messages, model=model, role=role, temperature=temperature, max_tokens=max_tokens):
+                        raw += token
+                        if len(raw) % 80 == 0:
+                            print(f"\r⏳ {arrows[i % len(arrows)]} ", end="", flush=True)
+                            i += 1
+                    print("\r" + " " * 20 + "\r", end="", flush=True)  # 清除箭头
+                    
+                else:
+                    raw = await self._llm.chat(full_messages, model=model, role=role, temperature=temperature, max_tokens=max_tokens)
             except Exception as exc:
                 return Envelop(receiver="user", payload={"ok": False, "error": f"LLM 调用失败: {type(exc).__name__}: {str(exc)}"})
 
@@ -541,19 +557,22 @@ class AICP_LLM:
 
             code = self._parser.extract_code_block(raw)
             if code is not None:
+              
                 result = await self.executor.execute(code)
                 if result.ok:
                     return Envelop(receiver="user", payload=result.to_dict())
 
+                import datetime
+                error_log = LOG_DIR / f"code_error_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:18]}.py"
+                error_log.write_text(f"# 错误信息: {result.error}\n# 时间: {datetime.datetime.now().isoformat()}\n# 迭代: {iteration + 1}/{max_iterations}\n\n{code}", encoding="utf-8")
+
                 hint = "已失败多次，请换一种方式。" if iteration >= 2 else ""
                 error_msg = self._format_error_feedback(result.error or "未知错误", code, hint)
-                logger.warning("Code execution failed (iteration %d): %s", iteration + 1, result.error)
+                logger.warning("Code execution failed (iteration %d): %s | saved to %s", iteration + 1, result.error, error_log)
                 print(f"\r⚠️ 尝试实现需求失败，正在重试 ({iteration + 1}/{max_iterations})...", file=sys.stderr)
-
                 full_messages.append({"role": "assistant", "content": raw})
                 full_messages.append({"role": "system", "content": error_msg})
                 continue
-
             return Envelop(receiver="user", payload={"ok": True, "data": raw})
 
         return Envelop(receiver="user", payload={"ok": False, "error": f"达到最大迭代次数 ({max_iterations})，任务未完成"})
