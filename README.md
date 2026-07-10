@@ -1,6 +1,6 @@
 # AICP_CLI
 
-> AICP([Agent Interaction & Communication Protocol](https://github.com/woozheng/aicp))协议驱动的 LLM 运行时 CLI —— 世界最小需求执行型 Agent，2000行+ 代码，8个文件。176K，跨平台。
+> AICP([Agent Interaction & Communication Protocol](https://github.com/woozheng/aicp))协议驱动的 LLM 运行时 CLI —— 世界最小需求执行型 Agent，2000行+ 代码，8个文件。176K，跨平台。由[AICP Engine](https://github.com/woozheng/aicp_engine) 创建.
 
 ## 能力边界
 
