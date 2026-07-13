@@ -27,24 +27,36 @@ Stateless, memoryless AICP CLI runtime — one conversation, straight to the res
 ## Installation
 
 ```bash
-# 1. Clone
-git clone https://github.com/woozheng/aicp_cli.git && cd aicp_cli
+# 1. Clone repository and enter project folder
+git clone https://github.com/woozheng/aicp_cli.git
+cd aicp_cli
 
-# 2. Install dependencies (minimum dependencies)
+# 2. Edit config file to set API key and model name
+# For Linux / Mac / WSL
+nano aicp.yaml
+# For Windows
+notepad aicp.yaml
+# Fill in api_key and model inside aicp.yaml
+
+# 3. Install required dependencies
 pip install -r requirements.txt
 
-# 3. Run
-# Windows
+# 4. Run the CLI tool
+# Windows (use built-in aicp.bat script)
 aicp
 
-# Linux & Mac
-python aicp.py
-
-# 4. Configuration file aicp.yaml is automatically generated on first run
-
-# Edit aicp.yaml, fill in model and api-key. After filling, run # 3 again
+# Linux / Mac / WSL
+python3 aicp.py
 
 ```
+
+Supplementary Notes
+1、Windows comes with aicp.bat for one-click launch.
+2、Use python3 aicp.py to start on Linux, macOS or WSL environments.
+3、All version constraints in requirements.txt use standard == syntax for cross-platform compatibility.
+4、api_key and model are mandatory fields in aicp.yaml, otherwise the tool cannot send requests normally.
+5、Python runtime is required before executing above commands.
+
 ## Use Cases
 Here's what you can ask it to do:
 
