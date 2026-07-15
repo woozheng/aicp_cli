@@ -736,7 +736,7 @@ class AICP_LLM:
         role: Optional[str] = None,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        stream: bool = False,
+        stream: bool = True,
         max_iter: Optional[int] = None,
         **kwargs: Any,
     ) -> Envelop:

@@ -120,7 +120,6 @@ class RemoteConfig:
         if not endpoints:
             return None
 
-        # 指定节点名则筛选，否则取第一个
         for ep in endpoints:
             if node_name is None or ep.get("name") == node_name:
                 return cls(
@@ -275,7 +274,7 @@ class RemoteChatEngine(ChatEngine):
 
 
 class LocalChatEngine(ChatEngine):
-    def __init__(self, config: Dict[str, Any], stream: bool = False) -> None:
+    def __init__(self, config: Dict[str, Any], stream: bool = True) -> None:
         self._aicp = AICP_LLM(config)
         self._stream = stream
 
@@ -372,7 +371,7 @@ class Application:
         config_path: Path,
         mode: ChatMode,
         node_name: Optional[str] = None,
-        stream: bool = False,
+        stream: bool = True,
     ) -> None:
         self._config = self._load_configuration(config_path)
         self._mode = mode
@@ -412,7 +411,7 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
     flags = {
         "remote": False,
         "verbose": False,
-        "stream": False,
+        "stream": True,
         "config": str(DEFAULT_CONFIG_PATH),
         "node": None,
     }
@@ -423,8 +422,8 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
             flags["remote"] = True
         elif arg in ("-v", "--verbose"):
             flags["verbose"] = True
-        elif arg in ("-s", "--stream"):
-            flags["stream"] = True
+        elif arg in ("--no-stream",):
+            flags["stream"] = False
         elif arg in ("-n", "--node"):
             if i + 1 < len(argv):
                 flags["node"] = argv[i + 1]
