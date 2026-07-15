@@ -1,0 +1,8 @@
+endpoints:
+  - name: "办公网节点"
+    url: "http://127.0.0.1:9000/api/builtins/aicp/chat"
+    token: "testtoken"
+    tags:
+      - "搜索"
+      - "国内网络"
+      - "代码执行"

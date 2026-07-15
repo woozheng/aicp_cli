@@ -1,0 +1,29 @@
+models:
+  roles:
+    default: doubao-seed-2.0-code
+
+  max_retries: 3
+  request_timeout: 180
+  stream_timeout: 300
+  max_concurrent: 5
+  providers:  
+    aggregator:
+      base_url: https://gpt-agent.cc/v1
+      api_key: ${AGGREGATOR_API_KEY}
+      models:
+      - id: claude-sonnet-4-6
+        max_tokens: 8192
+        temperature: 0.1
+      - id: doubao-seed-2.0-code
+        max_tokens: 8192
+        temperature: 0.1
+      - id: qwen3.6-flash
+        max_tokens: 8192
+        temperature: 0.1
+      - id: deepseek-v4-flash
+        max_tokens: 8192
+        temperature: 0.1
+  
+
+
+

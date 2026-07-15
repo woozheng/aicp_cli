@@ -28,6 +28,11 @@ try:
 except ImportError:
     httpx = None
 
+try:
+    import yaml as _yaml
+except ImportError:
+    _yaml = None
+
 from runtime._config import load_config
 from runtime._aicp_llm import AICP_LLM
 
@@ -36,6 +41,7 @@ from runtime._aicp_llm import AICP_LLM
 # ---------------------------------------------------------------------------
 
 DEFAULT_CONFIG_PATH: Path = Path(__file__).resolve().parent / "aicp.yaml"
+DEFAULT_ENDPOINTS_PATH: Path = Path(__file__).resolve().parent / "endpoints.yaml"
 DEFAULT_TIMEOUT_SECONDS: int = 120
 EXIT_COMMANDS: frozenset[str] = frozenset({"/exit", "/quit", "exit"})
 
@@ -86,11 +92,48 @@ class RemoteConfig:
     token: str = ""
 
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> Optional[RemoteConfig]:
-        endpoint = data.get("endpoint", "").strip()
-        if not endpoint:
+    def from_endpoints_config(cls, config: Dict[str, Any], node_name: Optional[str] = None) -> Optional[RemoteConfig]:
+        """从 endpoints.yaml 读取远端节点配置"""
+        endpoints_path = config.get("endpoints_config", "")
+        if not endpoints_path:
+            if DEFAULT_ENDPOINTS_PATH.exists():
+                endpoints_path = str(DEFAULT_ENDPOINTS_PATH)
+            else:
+                return None
+
+        path = Path(endpoints_path)
+        if not path.exists():
             return None
-        return cls(endpoint=endpoint, token=data.get("token", "").strip())
+
+        if _yaml is None:
+            logger.error("PyYAML is required to read endpoints config. Install it with: pip install pyyaml")
+            return None
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = _yaml.safe_load(f)
+        except Exception:
+            logger.exception("Failed to load endpoints config: %s", path)
+            return None
+
+        endpoints = data.get("endpoints", [])
+        if not endpoints:
+            return None
+
+        # 指定节点名则筛选，否则取第一个
+        for ep in endpoints:
+            if node_name is None or ep.get("name") == node_name:
+                return cls(
+                    endpoint=ep.get("url", ""),
+                    token=ep.get("token", ""),
+                )
+
+        if node_name:
+            logger.warning("Node '%s' not found in endpoints.yaml, using first available", node_name)
+            ep = endpoints[0]
+            return cls(endpoint=ep.get("url", ""), token=ep.get("token", ""))
+
+        return None
 
 
 @dataclass(frozen=True)
@@ -317,9 +360,10 @@ class ChatCLI:
 
 
 class Application:
-    def __init__(self, config_path: Path, mode: ChatMode) -> None:
+    def __init__(self, config_path: Path, mode: ChatMode, node_name: Optional[str] = None) -> None:
         self._config = self._load_configuration(config_path)
         self._mode = mode
+        self._node_name = node_name
 
     @staticmethod
     def _load_configuration(path: Path) -> Dict[str, Any]:
@@ -334,9 +378,12 @@ class Application:
 
     def create_engine(self) -> ChatEngine:
         if self._mode == ChatMode.REMOTE:
-            remote_cfg = RemoteConfig.from_dict(self._config.get("remote_aicp", {}))
+            remote_cfg = RemoteConfig.from_endpoints_config(self._config, self._node_name)
             if remote_cfg is None:
-                logger.critical("Remote mode selected but remote_aicp.endpoint is not configured.")
+                logger.critical(
+                    "Remote mode selected but no endpoints found in endpoints.yaml. "
+                    "Please create endpoints.yaml with at least one endpoint."
+                )
                 sys.exit(1)
             return RemoteChatEngine(remote_cfg, create_http_client())
         return LocalChatEngine(self._config)
@@ -348,19 +395,26 @@ class Application:
 
 
 def parse_args(argv: List[str]) -> Dict[str, Any]:
-    flags = {"remote": False, "verbose": False, "config": str(DEFAULT_CONFIG_PATH)}
-    for arg in argv[1:]:
+    flags = {"remote": False, "verbose": False, "config": str(DEFAULT_CONFIG_PATH), "node": None}
+    i = 1
+    while i < len(argv):
+        arg = argv[i]
         if arg in ("-r", "--remote"):
             flags["remote"] = True
         elif arg in ("-v", "--verbose"):
             flags["verbose"] = True
+        elif arg in ("-n", "--node"):
+            if i + 1 < len(argv):
+                flags["node"] = argv[i + 1]
+                i += 1
         elif arg.startswith("-c"):
             if "=" in arg:
                 flags["config"] = arg.split("=", 1)[1]
             else:
-                idx = argv.index(arg) + 1
-                if idx < len(argv):
-                    flags["config"] = argv[idx]
+                if i + 1 < len(argv):
+                    flags["config"] = argv[i + 1]
+                    i += 1
+        i += 1
     return flags
 
 
@@ -372,9 +426,9 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
 def main() -> None:
     args = parse_args(sys.argv)
     setup_logging(verbose=args["verbose"])
-    logger.info("Starting AICP CLI | config=%s | remote=%s", args["config"], args["remote"])
+    logger.info("Starting AICP CLI | config=%s | remote=%s | node=%s", args["config"], args["remote"], args["node"])
     mode = ChatMode.REMOTE if args["remote"] else ChatMode.LOCAL
-    app = Application(Path(args["config"]), mode)
+    app = Application(Path(args["config"]), mode, node_name=args["node"])
     engine = app.create_engine()
     cli = ChatCLI(engine)
     cli.run()
