@@ -300,7 +300,7 @@ async def _collect_remote_capabilities(endpoints: List[RemoteNode]) -> str:
     return "\n".join(remote_infos)
 
 
-def _build_capability_section(local_summary: str, remote_list: str) -> str:
+def _build_capability_section(local_summary: str, remote_list: str, endpoints: List[RemoteNode]) -> str:
     """组装本地与远端能力对比段落"""
     lines = [
         "【本地与远端能力对比】",
@@ -314,23 +314,41 @@ def _build_capability_section(local_summary: str, remote_list: str) -> str:
         "",
         remote_list,
         "",
-        "调用方式：",
+        "## 远端节点连接信息（代码中直接使用以下URL和Token）",
+        "",
+    ]
+    
+    for ep in endpoints:
+        lines.append(f"- **{ep.name}**: URL={ep.url}, Token={ep.token}")
+    
+    lines.extend([
+        "",
+        "调用方式（直接复制修改）：",
         "~~~python",
         "import requests",
+        "",
+        "# 示例：调用远端节点做数据分析",
         "resp = requests.post(",
-        '    "节点URL",',
-        '    headers={"Authorization": "Bearer token"},',
-        '    json={"messages": [{"role": "user", "content": "..."}], "model": "...", "temperature": 0.7}',
+        '    "http://127.0.0.1:9000/api/builtins/aicp/chat",  # 替换为上面列出的实际URL',
+        '    headers={"Authorization": "Bearer sk-your-token-here"},  # 替换为上面列出的实际Token',
+        "    json={",
+        '        "messages": [',
+        '            {"role": "user", "content": "请分析特斯拉2024年Q3财报，只返回JSON格式，不要其他文字"}',
+        "        ]",
+        "    }",
         ")",
-        'data = resp.json().get("data", "")',
+        "",
+        "result = resp.json().get(\"data\", \"\")",
+        "# result 是远端返回的结果，用Python解析后继续处理",
         "~~~",
         "",
         "【调用规则】",
         "1. 优先用本地能力：文件操作、subprocess、本地模型推理等直接用",
         "2. 本地无法满足时（如需要外网搜索、需要图片分析但本地不支持、需要GPU等），再调远端",
         "3. 调用远端时选最匹配的一个节点，不要重复调多个",
-        "4. 如果远端节点也无法满足需求，用你的知识写代码调用公开免费API（如HuggingFace、Replicate、Pollinations等），不要直接说做不到",
-    ]
+        "4. 如果远端节点也无法满足需求，用你的知识写代码调用公开免费API，不要直接说做不到",
+        "5. 调用远端时Token必须从上面列出的真实Token复制，禁止用占位符",
+    ])
     return "\n".join(lines)
 
 
@@ -685,7 +703,7 @@ class AICP_LLM:
 
             if remote_list:
                 local_summary = _build_local_capability_summary(self._config)
-                remote_section = _build_capability_section(local_summary, remote_list)
+                remote_section = _build_capability_section(local_summary, remote_list, endpoints)
             else:
                 remote_section = ""
 

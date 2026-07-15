@@ -26,6 +26,8 @@ logs/
 # Config (keep template, ignore real)
 aicp.yaml
 !aicp.yaml.example
+endpoints.yaml
+!endpoints.yaml.example
 
 # Temp
 *.tmp
