@@ -24,7 +24,8 @@ logs/
 *.log
 
 # Config (keep template, ignore real)
-
+aicp.yaml
+!aicp.yaml.example
 
 # Temp
 *.tmp
