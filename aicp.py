@@ -275,8 +275,9 @@ class RemoteChatEngine(ChatEngine):
 
 
 class LocalChatEngine(ChatEngine):
-    def __init__(self, config: Dict[str, Any]) -> None:
+    def __init__(self, config: Dict[str, Any], stream: bool = False) -> None:
         self._aicp = AICP_LLM(config)
+        self._stream = stream
 
     @property
     def banner(self) -> str:
@@ -284,18 +285,24 @@ class LocalChatEngine(ChatEngine):
 
     def send(self, user_message: str) -> ChatResponse:
         stop = threading.Event()
-        t = threading.Thread(target=_show_progress, args=(stop,), daemon=True)
-        t.start()
+        t = None
+        if not self._stream:
+            t = threading.Thread(target=_show_progress, args=(stop,), daemon=True)
+            t.start()
         try:
             result = asyncio.run(
-                self._aicp.chatEnvelop([{"role": "user", "content": user_message}])
+                self._aicp.chatEnvelop(
+                    [{"role": "user", "content": user_message}],
+                    stream=self._stream
+                )
             )
         except Exception as exc:
             logger.exception("Local chat failed")
             return ChatResponse.fail(str(exc))
         finally:
             stop.set()
-            t.join(timeout=0.5)
+            if t is not None:
+                t.join(timeout=0.5)
         if result.payload.get("ok"):
             return ChatResponse.ok(result.payload.get("data", ""))
         return ChatResponse.fail(result.payload.get("error", "未知错误"))
@@ -360,10 +367,17 @@ class ChatCLI:
 
 
 class Application:
-    def __init__(self, config_path: Path, mode: ChatMode, node_name: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        config_path: Path,
+        mode: ChatMode,
+        node_name: Optional[str] = None,
+        stream: bool = False,
+    ) -> None:
         self._config = self._load_configuration(config_path)
         self._mode = mode
         self._node_name = node_name
+        self._stream = stream
 
     @staticmethod
     def _load_configuration(path: Path) -> Dict[str, Any]:
@@ -386,7 +400,7 @@ class Application:
                 )
                 sys.exit(1)
             return RemoteChatEngine(remote_cfg, create_http_client())
-        return LocalChatEngine(self._config)
+        return LocalChatEngine(self._config, stream=self._stream)
 
 
 # ---------------------------------------------------------------------------
@@ -395,7 +409,13 @@ class Application:
 
 
 def parse_args(argv: List[str]) -> Dict[str, Any]:
-    flags = {"remote": False, "verbose": False, "config": str(DEFAULT_CONFIG_PATH), "node": None}
+    flags = {
+        "remote": False,
+        "verbose": False,
+        "stream": False,
+        "config": str(DEFAULT_CONFIG_PATH),
+        "node": None,
+    }
     i = 1
     while i < len(argv):
         arg = argv[i]
@@ -403,6 +423,8 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
             flags["remote"] = True
         elif arg in ("-v", "--verbose"):
             flags["verbose"] = True
+        elif arg in ("-s", "--stream"):
+            flags["stream"] = True
         elif arg in ("-n", "--node"):
             if i + 1 < len(argv):
                 flags["node"] = argv[i + 1]
@@ -426,9 +448,17 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
 def main() -> None:
     args = parse_args(sys.argv)
     setup_logging(verbose=args["verbose"])
-    logger.info("Starting AICP CLI | config=%s | remote=%s | node=%s", args["config"], args["remote"], args["node"])
+    logger.info(
+        "Starting AICP CLI | config=%s | remote=%s | node=%s | stream=%s",
+        args["config"], args["remote"], args["node"], args["stream"],
+    )
     mode = ChatMode.REMOTE if args["remote"] else ChatMode.LOCAL
-    app = Application(Path(args["config"]), mode, node_name=args["node"])
+    app = Application(
+        Path(args["config"]),
+        mode,
+        node_name=args["node"],
+        stream=args["stream"],
+    )
     engine = app.create_engine()
     cli = ChatCLI(engine)
     cli.run()

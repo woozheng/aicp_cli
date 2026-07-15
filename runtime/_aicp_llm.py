@@ -749,14 +749,14 @@ class AICP_LLM:
             try:
                 if stream:
                     raw = ""
-                    arrows = ['→', '⇒', '⟹', '⟶', '⟼', '⤏', '⇢', '⇨']
-                    i = 0
+                    count = 0
                     async for token in self._llm.chat_stream(full_messages, model=model, role=role, temperature=temperature, max_tokens=max_tokens):
                         raw += token
-                        if len(raw) % 80 == 0:
-                            print(f"\r⏳ {arrows[i % len(arrows)]} ", end="", flush=True)
-                            i += 1
-                    print("\r" + " " * 20 + "\r", end="", flush=True)
+                        count += 1
+                        sys.stdout.write(f"\r⏳ {count} tokens")
+                        sys.stdout.flush()
+                    sys.stdout.write("\n")
+                    sys.stdout.flush()
                 else:
                     raw = await self._llm.chat(full_messages, model=model, role=role, temperature=temperature, max_tokens=max_tokens)
             except Exception as exc:
