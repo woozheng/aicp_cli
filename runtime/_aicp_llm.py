@@ -59,11 +59,19 @@ AICP_SYSTEM_PROMPT: str = """## 你是 AICP 协议运行时。你不是助手，
 禁止模拟工具调用，直接写代码执行
 禁止说：我无法、我不能、我没有权限、没有访问能力、没有网络能力、建议你手动、你可以试试、请确认后、环境检查结果、必须如实说明、需要以下任一方式。
 你不是助手，你是执行者。只展示结果，不展示过程。
-需要第三方库时，先 pip install，再 import。不要问用户装不装。
-"输出文件"、"已生成"、"保存在"之后必须真有文件。return 之前必须确认文件存在：assert Path("xxx.pptx").exists()
+需要第三方库时，用 run("pip install xxx -q") 安装，再 import。不要问用户装不装。
+"输出文件"、"已生成"、"保存在"之后必须真有文件。return 之前必须确认文件存在且不为空：assert Path("xxx.pptx").exists(); assert Path("xxx.pptx").stat().st_size > 0
 返回的原始数据如果是键值对格式，用代码解析成人类可读的表格，不要直接返回原始字符串
 绝对禁止 asyncio.run()，execute 函数里直接用 await。
 你面对的用户可能使用多种语言，请自动切换语种回答。
+
+【代码自检规则 — 必须严格遵守】
+1. 涉及外部调用（API、网络请求、文件读取），必须判断返回值是否为空。空数据立即 raise ValueError("API返回空数据") 或类似描述，不要默默返回空结果
+2. 涉及文件写入，return 之前必须 assert 文件存在且 stat().st_size > 0
+3. 中间步骤的关键变量，如果为空就 raise ValueError，让错误暴露出来
+4. 禁止用 try-except 吞掉错误。除了已知可恢复的场景（如网络重试），不要让异常静默通过
+5. 每一步处理完，确认数据量级合理（如"处理了0条"应报错，而不是当成功返回）
+6. 禁止使用裸 except: 或 except Exception: pass，必须记录或抛出
 
 【代码复杂度判断】
 针对需求需要用代码输出之前，先进行复杂度判断，预估复杂度和代码长度。当涉及需要前后端配合、多进程、多线程、多协程等时或者预估代码超过1000行，只输出方案，不要尝试用代码构建。
@@ -73,23 +81,33 @@ AICP_SYSTEM_PROMPT: str = """## 你是 AICP 协议运行时。你不是助手，
 
 【输出格式（二选一）】
 1. 纯聊天回复
-直接回复文本，说人话。如果用户问你是谁，回答："我是 AICP 协议运行时",如果你的知识可以回答问题，回答问题。
+直接回复文本，说人话。禁止用代码块包裹。禁止出现 ~~~python 或 ```python 标记。
+如果用户问你是谁，回答："我是 AICP 协议运行时",如果你的知识可以回答问题，回答问题。
 
 2. 需要执行操作时 — 直接写 Python 代码，用代码块包裹，禁止模拟工具调用，直接写代码执行
-示例：
+【重要1】其中必须实现函数签名 async def execute(envelop, agent):
+  中间是代码逻辑
+【重要2】返回必须是  return {"data": "输出你的结果"}
+系统会自动调用 execute(envelop, agent)
+【重要3】
+Windows 上执行命令必须用 run(cmd) 而不是 subprocess.run()。
+run() 自动处理编码，subprocess.run() 会导致中文乱码。
+错误示例: subprocess.run("dir", shell=True, capture_output=True, text=True)
+正确示例: run("dir")
+
+示例如下
 ~~~python
 async def execute(envelop, agent):
-    import os, subprocess
-    from pathlib import Path
-    result = subprocess.run("dir", shell=True, capture_output=True, text=True)
-    return {"data": f"当前目录：\\n{result.stdout}"}
+    # run() 自动处理编码，返回 str，直接使用
+    result = run("dir")
+    return {"data": f"当前目录：\n{result}"}
 ~~~
 
 【规则】
 1、纯聊天 → 说人话
 2、任何操作 → 写 Python 代码，return 里用自然语言包装结果
 禁止说"我无法"、"你可以试试"、"以下是方法"
-代码里直接用 os、subprocess、Path
+代码里直接用 os、Path
 只输出代码块或纯文本
 
 
@@ -139,13 +157,13 @@ async def execute(envelop, agent):
 你是 Python 专家，你知道怎么打开浏览器、操控网页、截图、爬数据。
 根据用户需求选择方式，优先简单方案：
 
-1. 打开网页让用户看 → subprocess.run("start 网址", shell=True)，浏览器保持打开
+1. 打开网页让用户看 → run("start 网址", shell=True)，浏览器保持打开
 2. 需要操控网页内部 → Playwright 自动化
 3. 需要爬数据 → requests 直接抓
 
 Playwright 注意事项：
 - async with 退出时浏览器会自动关闭
-- 如果用户需要保持浏览器打开，不要用 Playwright，用 subprocess
+- 如果用户需要保持浏览器打开，不要用 Playwright，用 run
 - 如果用户已手动关闭浏览器，不要重新打开
 - 用 Playwright 时不要重复打开用户已关闭的页面
 
@@ -156,7 +174,7 @@ Playwright 注意事项：
 # 端点配置与远端能力收集
 # ============================================================================
 
-REMOTE_CAPS_CACHE_TTL: float = 300.0  # 类级别缓存有效期，5分钟
+REMOTE_CAPS_CACHE_TTL: float = 300.0
 
 
 @dataclass
@@ -168,7 +186,6 @@ class RemoteNode:
 
 
 def _load_endpoints_config(config: Dict[str, Any]) -> List[RemoteNode]:
-    """加载端点配置文件，支持 yaml/json"""
     endpoints_path = config.get("endpoints_config", "")
     if not endpoints_path:
         default_path = Path(__file__).parent.parent / "endpoints.yaml"
@@ -183,59 +200,43 @@ def _load_endpoints_config(config: Dict[str, Any]) -> List[RemoteNode]:
 
     try:
         with open(path, "r", encoding="utf-8") as f:
-            if path.suffix in (".yaml", ".yml"):
-                data = _yaml.safe_load(f)
-            else:
-                data = json.load(f)
+            data = _yaml.safe_load(f) if path.suffix in (".yaml", ".yml") else json.load(f)
     except Exception:
-        logger.warning(f"无法加载端点配置文件: {path}")
+        logger.warning("无法加载端点配置文件: %s", path)
         return []
 
-    nodes = []
-    for ep in data.get("endpoints", []):
-        nodes.append(RemoteNode(
+    return [
+        RemoteNode(
             name=ep.get("name", "unknown"),
             url=ep.get("url", ""),
             token=ep.get("token", ""),
             tags=ep.get("tags", []),
-        ))
-    return nodes
+        )
+        for ep in data.get("endpoints", [])
+    ]
 
-
-# ============================================================================
-# 本地与远端能力格式化
-# ============================================================================
 
 def _build_local_capability_summary(config: Dict[str, Any]) -> str:
-    """生成本地能力摘要，只列确定的事实，模型能力写自行判断"""
     system = platform.system()
-    lines = [
+    return "\n".join([
         f"- 操作系统: {system}",
-        "- 代码执行: ✅ (本地沙箱，可直接 os/subprocess/Path)",
+        "- 代码执行: ✅ (本地沙箱，可直接 os/run/Path)",
         "- 文件操作: ✅ (读写本地文件)",
-        "- 浏览器操控: ✅ (Playwright/subprocess)",
+        "- 浏览器操控: ✅ (Playwright/run)",
         "- LLM推理: ✅ (当前模型，具体能力边界由你自行判断)",
-    ]
-    return "\n".join(lines)
+    ])
 
 
 def _format_capability_for_llm(name: str, url: str, caps: dict) -> str:
-    """将远端能力 dict 翻译成 LLM 可理解的自然语言描述，与本地能力维度对齐"""
-    parts = [f"- **{name}**"]
-    parts.append(f"  URL: {url}")
+    parts = [f"- **{name}**", f"  URL: {url}"]
 
-    # 代码执行
     code_exec = caps.get("tools", {}).get("code_execution", False)
     parts.append(f"  - 代码执行: {'✅' if code_exec else '❌'}")
-
-    # 文件操作（远端一般不直接操作本地文件）
     parts.append("  - 文件操作: ❌ (远端无法访问本地文件)")
 
-    # 浏览器操控
     browser = caps.get("tools", {}).get("browser", False)
     parts.append(f"  - 浏览器操控: {'✅' if browser else '❌'}")
 
-    # 网络
     net = caps.get("network", {})
     if net.get("can_access_foreign"):
         parts.append("  - 外网访问: ✅")
@@ -244,19 +245,12 @@ def _format_capability_for_llm(name: str, url: str, caps: dict) -> str:
     else:
         parts.append("  - 外网访问: ❌")
 
-    # LLM 推理
     models = caps.get("llm", {}).get("models", caps.get("models", []))
-    if models:
-        models_str = ', '.join(models)
-        parts.append(f"  - LLM推理: ✅ ({models_str})")
-    else:
-        parts.append("  - LLM推理: ✅ (具体能力未知)")
+    parts.append(f"  - LLM推理: ✅ ({', '.join(models)})" if models else "  - LLM推理: ✅ (具体能力未知)")
 
-    # 图片分析
     supports_vision = caps.get("llm", {}).get("supports_vision", False)
     parts.append(f"  - 图片分析: {'✅' if supports_vision else '❌'}")
 
-    # GPU
     gpu = caps.get("compute", caps.get("gpu", {}))
     if gpu.get("gpu", gpu.get("available", False)):
         model = gpu.get("gpu_model", gpu.get("model", "GPU"))
@@ -268,26 +262,23 @@ def _format_capability_for_llm(name: str, url: str, caps: dict) -> str:
 
 
 async def _collect_remote_capabilities(endpoints: List[RemoteNode]) -> str:
-    """收集所有远端节点的能力，返回拼装好的远端节点列表"""
     if not endpoints:
         print("[REMOTE CAPS] 无端点配置")
         return ""
 
     remote_infos = []
-
     for ep in endpoints:
         try:
             resp = _requests.post(
                 ep.url,
                 headers={"Authorization": f"Bearer {ep.token}"},
                 json={"action": "capabilities"},
-                timeout=15
+                timeout=15,
             )
             if resp.status_code == 200:
                 caps = resp.json().get("data", {})
                 print(f"[REMOTE CAPS] {ep.name} 探测成功: {json.dumps(caps, ensure_ascii=False)}")
-                desc = _format_capability_for_llm(ep.name, ep.url, caps)
-                remote_infos.append(desc)
+                remote_infos.append(_format_capability_for_llm(ep.name, ep.url, caps))
             else:
                 print(f"[REMOTE CAPS] {ep.name} 返回非200: {resp.status_code}, 跳过")
         except Exception as e:
@@ -295,13 +286,14 @@ async def _collect_remote_capabilities(endpoints: List[RemoteNode]) -> str:
 
     if not remote_infos:
         print("[REMOTE CAPS] 无可用远端节点")
-        return ""
+    else:
+        print(f"[REMOTE CAPS] 共 {len(remote_infos)} 个远端节点可用")
 
     return "\n".join(remote_infos)
 
 
+
 def _build_capability_section(local_summary: str, remote_list: str, endpoints: List[RemoteNode]) -> str:
-    """组装本地与远端能力对比段落"""
     lines = [
         "【本地与远端能力对比】",
         "",
@@ -317,37 +309,33 @@ def _build_capability_section(local_summary: str, remote_list: str, endpoints: L
         "## 远端节点连接信息（代码中直接使用以下URL和Token）",
         "",
     ]
-    
+
     for ep in endpoints:
         lines.append(f"- **{ep.name}**: URL={ep.url}, Token={ep.token}")
-    
+
     lines.extend([
         "",
         "调用方式（直接复制修改）：",
         "~~~python",
         "import requests",
         "",
-        "# 示例：调用远端节点做数据分析",
         "resp = requests.post(",
-        '    "http://127.0.0.1:9000/api/builtins/aicp/chat",  # 替换为上面列出的实际URL',
-        '    headers={"Authorization": "Bearer sk-your-token-here"},  # 替换为上面列出的实际Token',
+        '    "http://127.0.0.1:9000/api/builtins/aicp/chat",',
+        '    headers={"Authorization": "Bearer sk-your-token-here"},',
         "    json={",
         '        "messages": [',
-        '            {"role": "user", "content": "请分析特斯拉2024年Q3财报，只返回JSON格式，不要其他文字"}',
+        '            {"role": "user", "content": "请分析特斯拉2024年Q3财报，只返回JSON格式"}',
         "        ]",
         "    }",
         ")",
-        "",
-        "result = resp.json().get(\"data\", \"\")",
-        "# result 是远端返回的结果，用Python解析后继续处理",
+        'result = resp.json().get("data", "")',
         "~~~",
         "",
         "【调用规则】",
-        "1. 优先用本地能力：文件操作、subprocess、本地模型推理等直接用",
-        "2. 本地无法满足时（如需要外网搜索、需要图片分析但本地不支持、需要GPU等），再调远端",
-        "3. 调用远端时选最匹配的一个节点，不要重复调多个",
-        "4. 如果远端节点也无法满足需求，用你的知识写代码调用公开免费API，不要直接说做不到",
-        "5. 调用远端时Token必须从上面列出的真实Token复制，禁止用占位符",
+        "1. 优先用本地能力：文件操作、run、本地模型推理等直接用",
+        "2. 本地无法满足时再调远端，选最匹配的一个节点，不要重复调多个",
+        "3. 远端也无法满足时，用你的知识写代码调用公开免费API",
+        "4. 调用远端时Token必须从上面列出的真实Token复制，禁止用占位符",
     ])
     return "\n".join(lines)
 
@@ -386,7 +374,6 @@ class CodeExecutor:
             "asyncio": asyncio,
             "json": json,
             "os": __import__("os"),
-            "subprocess": __import__("subprocess"),
             "Path": Path,
             "open": open,
             "requests": _requests,
@@ -397,83 +384,116 @@ class CodeExecutor:
         }
 
     @staticmethod
-    def _safe_run(cmd: Union[str, List[str]], timeout: int = DEFAULT_SUBPROCESS_TIMEOUT) -> str:
+    def _safe_run(cmd, timeout=DEFAULT_SUBPROCESS_TIMEOUT):
         import platform as _platform
         import subprocess as _subprocess
 
         if timeout > CodeExecutor.MAX_SUBPROCESS_TIMEOUT:
             raise ValueError(f"Timeout {timeout}s exceeds maximum {CodeExecutor.MAX_SUBPROCESS_TIMEOUT}s")
-
         if _platform.system() == "Windows" and isinstance(cmd, list):
             cmd = " ".join(cmd)
 
-        try:
-            result = _subprocess.run(cmd, shell=True, capture_output=True, timeout=timeout, text=False)
-            for enc in ["utf-8", "gbk", "gb2312", "gb18030", "latin-1"]:
-                try:
-                    stdout = result.stdout.decode(enc)
-                    if stdout.strip():
-                        return stdout
-                except (UnicodeDecodeError, LookupError):
-                    continue
-            return result.stdout.decode("utf-8", errors="replace")
-        except _subprocess.TimeoutExpired:
-            raise
-        except Exception:
-            raise
+        result = _subprocess.run(
+            cmd, shell=True, capture_output=True, timeout=timeout,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        return result.stdout
 
     @staticmethod
     def _safe_fetch(url: str, timeout: int = 15) -> str:
+        resp = _requests.get(url, timeout=timeout, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        resp.raise_for_status()
+        if resp.encoding and resp.encoding.lower() != "iso-8859-1":
+            resp.encoding = resp.encoding
+        else:
+            resp.encoding = resp.apparent_encoding or "utf-8"
+        return resp.text
+
+    async def _auto_install_module(self, error_msg: str) -> bool:
+        """尝试自动安装缺失的模块，成功返回 True"""
+        module_name = error_msg.split("'")[1] if "'" in error_msg else error_msg
         try:
-            resp = _requests.get(url, timeout=timeout, headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            })
-            resp.raise_for_status()
-            if resp.encoding and resp.encoding.lower() != "iso-8859-1":
-                resp.encoding = resp.encoding
-            else:
-                resp.encoding = resp.apparent_encoding or "utf-8"
-            return resp.text
-        except _requests.RequestException:
-            raise
+            install_msg = await self._agent.llm.chat([
+                {
+                    "role": "system",
+                    "content": (
+                        f"代码执行时报错：{error_msg}。python版本>3.11。"
+                        "你需要用 pip 安装对应的包。只输出 pip install 命令，不要任何解释。"
+                        "注意 import 名和 pip 包名可能不同"
+                        "（如 PIL→Pillow, bs4→beautifulsoup4, cv2→opencv-python, "
+                        "sklearn→scikit-learn, yaml→pyyaml, dotenv→python-dotenv）。"
+                    ),
+                },
+                {"role": "user", "content": f"ModuleNotFoundError: {error_msg}"},
+            ])
+            install_cmd = install_msg.strip()
+            if install_cmd.startswith("pip install") or install_cmd.startswith("pip3 install"):
+                import subprocess
+                subprocess.run(install_cmd, shell=True, capture_output=True)
+                return True
+        except Exception:
+            pass
+        return False
 
     async def execute(self, code: str) -> ExecutionResult:
         local_vars: Dict[str, Any] = {}
         try:
             exec(code, self._globals, local_vars)
-            execute_fn = local_vars.get("execute")
-            if execute_fn is None:
-                return ExecutionResult(ok=True, data="任务完成")
-            if not callable(execute_fn):
-                return ExecutionResult(ok=False, error=f"execute 不是可调用对象，类型为 {type(execute_fn).__name__}")
-
-            envelop = Envelop(payload={"state": {}})
-            try:
-                if inspect.iscoroutinefunction(execute_fn):
-                    result = await execute_fn(envelop, self._agent)
-                else:
-                    result = execute_fn(envelop, self._agent)
-            except Exception as exc:
-                return ExecutionResult(ok=False, error=f"{type(exc).__name__}: {str(exc)}")
-
-            if isinstance(result, dict):
-                data = result.get("data", str(result))
-            else:
-                data = str(result)
-            if data and isinstance(data, str) and ("LLM请求失败" in data or "系统错误" in data or "bytes is not JSON serializable" in data):
-                 return ExecutionResult(ok=False, error=data)
-            return ExecutionResult(ok=True, data=str(data))
         except SyntaxError as exc:
             return ExecutionResult(ok=False, error=f"语法错误 (行 {exc.lineno}): {exc.msg}")
+        except ModuleNotFoundError as exc:
+            if await self._auto_install_module(str(exc)):
+                return await self.execute(code)
+            return ExecutionResult(ok=False, error=f"ModuleNotFoundError: {str(exc)}")
         except Exception as exc:
             return ExecutionResult(ok=False, error=f"{type(exc).__name__}: {str(exc)}")
 
+        execute_fn = local_vars.get("execute")
+        if execute_fn is None:
+            return ExecutionResult(ok=True, data="任务完成")
+        if not callable(execute_fn):
+            return ExecutionResult(ok=False, error=f"execute 不是可调用对象，类型为 {type(execute_fn).__name__}")
+
+        envelop = Envelop(payload={"state": {}})
+        try:
+            if inspect.iscoroutinefunction(execute_fn):
+                result = await execute_fn(envelop, self._agent)
+            else:
+                result = execute_fn(envelop, self._agent)
+        except ModuleNotFoundError as exc:
+            if await self._auto_install_module(str(exc)):
+                return await self.execute(code)
+            return ExecutionResult(ok=False, error=f"ModuleNotFoundError: {str(exc)}")
+        except Exception as exc:
+            return ExecutionResult(ok=False, error=f"{type(exc).__name__}: {str(exc)}")
+
+        if isinstance(result, dict):
+            data = result.get("data", str(result))
+        else:
+            data = str(result)
+
+        # 检查明显的失败信号
+        if data and isinstance(data, str):
+            failure_keywords = ("LLM请求失败", "系统错误", "bytes is not JSON serializable")
+            if any(kw in data for kw in failure_keywords):
+                return ExecutionResult(ok=False, error=data)
+
+        return ExecutionResult(ok=True, data=str(data))
+
 
 class ProtocolParser:
-    PYTHON_CODE_BLOCK_PATTERN = re.compile(r"(?:```python|~~~python)\s*\n(.*?)(?:```|~~~)", re.DOTALL)
-    GENERIC_CODE_BLOCK_PATTERN = re.compile(r"(?:```|~~~)\s*\n(.*?)(?:```|~~~)", re.DOTALL)
+    PYTHON_CODE_BLOCK_PATTERN = re.compile(
+        r"(?:```python|~~~python)\s*\n(.*?)(?:```|~~~)", re.DOTALL
+    )
+    GENERIC_CODE_BLOCK_PATTERN = re.compile(
+        r"(?:```|~~~)\s*\n(.*?)(?:```|~~~)", re.DOTALL
+    )
     PYTHON_CODE_INDICATORS = ("def execute", "import ", "from ", "agent.", "await ", "async def")
-    JSON_BLOCK_PATTERN = re.compile(r"(?:```json|~~~json)\s*\n(.*?)(?:```|~~~)", re.DOTALL)
+    JSON_BLOCK_PATTERN = re.compile(
+        r"(?:```json|~~~json)\s*\n(.*?)(?:```|~~~)", re.DOTALL
+    )
 
     @staticmethod
     def extract_code_block(raw: str) -> Optional[str]:
@@ -493,25 +513,20 @@ class ProtocolParser:
     def extract_envelop(raw: str) -> Optional[Envelop]:
         if not raw:
             return None
-        try:
-            data = json.loads(raw.strip())
-            if ProtocolParser._is_envelop_dict(data):
-                return Envelop.from_dict(data)
-        except json.JSONDecodeError:
-            pass
-        match = ProtocolParser.JSON_BLOCK_PATTERN.search(raw)
-        if match:
+
+        candidates = [raw.strip()]
+        json_match = ProtocolParser.JSON_BLOCK_PATTERN.search(raw)
+        if json_match:
+            candidates.append(json_match.group(1).strip())
+
+        for candidate in candidates:
             try:
-                data = json.loads(match.group(1).strip())
-                if ProtocolParser._is_envelop_dict(data):
+                data = json.loads(candidate)
+                if isinstance(data, dict) and "receiver" in data and "payload" in data:
                     return Envelop.from_dict(data)
             except json.JSONDecodeError:
-                pass
+                continue
         return None
-
-    @staticmethod
-    def _is_envelop_dict(data: Any) -> bool:
-        return isinstance(data, dict) and "receiver" in data and "payload" in data
 
 
 def _detect_environment(config: Dict[str, Any]) -> str:
@@ -520,6 +535,7 @@ def _detect_environment(config: Dict[str, Any]) -> str:
     is_macos = system == "Darwin"
     is_linux = system == "Linux"
 
+    # 工具检测
     has_playwright = False
     has_docker = False
     has_git = False
@@ -551,22 +567,18 @@ def _detect_environment(config: Dict[str, Any]) -> str:
         except Exception:
             pass
 
+    # 网络检测
     can_access_foreign = False
     can_access_domestic = False
-    
     try:
-        resp = _requests.get("https://www.google.com", timeout=3)
-        can_access_foreign = resp.status_code == 200
+        can_access_foreign = _requests.get("https://www.google.com", timeout=3).status_code == 200
     except Exception:
         pass
-    
     try:
-        resp = _requests.get("https://www.baidu.com", timeout=3)
-        can_access_domestic = resp.status_code == 200
+        can_access_domestic = _requests.get("https://www.baidu.com", timeout=3).status_code == 200
     except Exception:
         pass
-    
-    network_hint = ""
+
     if not can_access_foreign and can_access_domestic:
         network_hint = "当前网络无法访问国外网站，优先使用国内源和远端API搜索"
     elif can_access_foreign:
@@ -574,10 +586,11 @@ def _detect_environment(config: Dict[str, Any]) -> str:
     else:
         network_hint = "当前网络受限，尽量使用远端API"
 
+    # 内存
     memory_gb = 0.0
     try:
         import psutil
-        memory_gb = psutil.virtual_memory().total / (1024**3)
+        memory_gb = psutil.virtual_memory().total / (1024 ** 3)
     except ImportError:
         pass
 
@@ -596,8 +609,6 @@ def _detect_environment(config: Dict[str, Any]) -> str:
         "## 网络状态",
         f"- {network_hint}",
     ]
-    
-   
 
     if is_windows:
         env_parts.extend([
@@ -640,7 +651,6 @@ class SystemPromptBuilder:
 
 
 class AICP_LLM:
-    # 类级别缓存：同一进程内所有实例共享，避免重复探测
     _cached_remote_section: Optional[str] = None
     _cached_remote_ts: float = 0.0
 
@@ -656,7 +666,6 @@ class AICP_LLM:
         self._is_remote = is_remote
         self._max_iterations = max_iterations
         self._config = config
-
         self._parser = ProtocolParser()
         self._executor: Optional[CodeExecutor] = None
 
@@ -686,47 +695,38 @@ class AICP_LLM:
         return self._executor
 
     async def _collect_and_inject(self):
-        """收集远端能力并注入 system prompt（类级别缓存，含本地与远端对比）"""
-        print("[REMOTE CAPS] 开始收集远端能力...")
-
         now = time.time()
         if (
             AICP_LLM._cached_remote_section is not None
             and now - AICP_LLM._cached_remote_ts < REMOTE_CAPS_CACHE_TTL
         ):
-            print("[REMOTE CAPS] 命中类级别缓存，跳过网络探测")
+            remaining = REMOTE_CAPS_CACHE_TTL - (now - AICP_LLM._cached_remote_ts)
+            print(f"[REMOTE CAPS] 命中缓存 (TTL剩余 {remaining:.0f}s)，跳过网络探测")
             remote_section = AICP_LLM._cached_remote_section
         else:
+            print("[REMOTE CAPS] 开始收集远端能力...")
             endpoints = _load_endpoints_config(self._config)
             print(f"[REMOTE CAPS] 加载到 {len(endpoints)} 个端点")
             remote_list = await _collect_remote_capabilities(endpoints)
-
             if remote_list:
                 local_summary = _build_local_capability_summary(self._config)
                 remote_section = _build_capability_section(local_summary, remote_list, endpoints)
             else:
                 remote_section = ""
-
             AICP_LLM._cached_remote_section = remote_section
             AICP_LLM._cached_remote_ts = now
+            print("[REMOTE CAPS] 远端能力收集完成，已注入 system prompt")
 
-        if remote_section:
-            self._system_prompt = self._system_prompt.replace("{remote_section}", remote_section)
-        else:
-            self._system_prompt = self._system_prompt.replace("{remote_section}", "")
-
+        self._system_prompt = self._system_prompt.replace("{remote_section}", remote_section)
         self._remote_caps_ready = True
-        print("[REMOTE CAPS] 远端能力收集完成，已注入 system prompt")
 
     async def _ensure_remote_capabilities(self):
-        """确保远端能力已收集"""
         if self._remote_caps_ready:
             return
-
         if self._remote_caps_task is None:
-            loop = asyncio.get_running_loop()
-            self._remote_caps_task = loop.create_task(self._collect_and_inject())
-
+            self._remote_caps_task = asyncio.get_running_loop().create_task(
+                self._collect_and_inject()
+            )
         await self._remote_caps_task
 
     async def chatEnvelop(
@@ -746,11 +746,15 @@ class AICP_LLM:
         full_messages = self._build_messages(messages, role)
 
         for iteration in range(max_iterations):
+            # ===== Step 1: 调用 LLM =====
             try:
                 if stream:
                     raw = ""
                     count = 0
-                    async for token in self._llm.chat_stream(full_messages, model=model, role=role, temperature=temperature, max_tokens=max_tokens):
+                    async for token in self._llm.chat_stream(
+                        full_messages, model=model, role=role,
+                        temperature=temperature, max_tokens=max_tokens,
+                    ):
                         raw += token
                         count += 1
                         sys.stdout.write(f"\r⏳ {count} tokens")
@@ -758,52 +762,98 @@ class AICP_LLM:
                     sys.stdout.write("\n")
                     sys.stdout.flush()
                 else:
-                    raw = await self._llm.chat(full_messages, model=model, role=role, temperature=temperature, max_tokens=max_tokens)
+                    raw = await self._llm.chat(
+                        full_messages, model=model, role=role,
+                        temperature=temperature, max_tokens=max_tokens,
+                    )
             except Exception as exc:
-                return Envelop(receiver="user", payload={"ok": False, "error": f"LLM 调用失败: {type(exc).__name__}: {str(exc)}"})
+                logger.error("LLM call failed: %s", exc)
+                return Envelop(
+                    receiver="user",
+                    payload={"ok": False, "error": f"LLM 调用失败: {type(exc).__name__}: {str(exc)}"},
+                )
 
             if not raw:
                 return Envelop(receiver="user", payload={"ok": True, "data": ""})
 
+            # ===== Step 2: 尝试 Envelop 路由 =====
             protocol = self._parser.extract_envelop(raw)
             if protocol is not None:
                 try:
                     result = await route(protocol, self.agent)
                     return Envelop(receiver="user", payload={"ok": True, "data": result.payload})
                 except Exception as exc:
+                    logger.warning("Envelop route failed (iteration %d): %s", iteration + 1, exc)
                     full_messages.append({"role": "assistant", "content": raw})
-                    full_messages.append({"role": "system", "content": f"执行失败: {str(exc)}，请直接写代码完成"})
+                    full_messages.append({
+                        "role": "user",
+                        "content": f"执行失败: {type(exc).__name__}: {str(exc)}，请直接写代码完成原始需求。",
+                    })
                     continue
 
+            # ===== Step 3: 尝试代码执行 =====
             code = self._parser.extract_code_block(raw)
             if code is not None:
-                result = await self.executor.execute(code)
+                try:
+                    result = await self.executor.execute(code)
+                except Exception as exc:
+                    logger.error("Executor crashed (iteration %d): %s", iteration + 1, exc)
+                    result = ExecutionResult(
+                        ok=False,
+                        error=f"Executor异常: {type(exc).__name__}: {str(exc)}",
+                    )
+
                 if result.ok:
                     return Envelop(receiver="user", payload=result.to_dict())
 
-                error_log = LOG_DIR / f"code_error_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:18]}.py"
+                # 保存错误日志
+                error_log = LOG_DIR / (
+                    f"code_error_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:18]}.py"
+                )
                 error_log.write_text(
                     f"# 错误信息: {result.error}\n"
                     f"# 时间: {datetime.datetime.now().isoformat()}\n"
-                    f"# 迭代: {iteration + 1}/{max_iterations}\n\n"
-                    f"{code}",
-                    encoding="utf-8"
+                    f"# 迭代: {iteration + 1}/{max_iterations}\n\n{code}",
+                    encoding="utf-8",
+                )
+                logger.warning(
+                    "Code execution failed (iteration %d/%d): %s | saved to %s",
+                    iteration + 1, max_iterations, result.error, error_log,
                 )
 
-                hint = "已失败多次，请换一种方式。" if iteration >= 2 else ""
-                error_msg = self._format_error_feedback(result.error or "未知错误", code, hint)
-                logger.warning("Code execution failed (iteration %d): %s | saved to %s", iteration + 1, result.error, error_log)
-                print(f"\r⚠️ 尝试实现需求失败，正在重试 ({iteration + 1}/{max_iterations})...", file=sys.stderr)
+                # 构造错误反馈
+                remaining = max_iterations - iteration - 1
+                if remaining <= 0:
+                    hint = "这是最后一次尝试，请务必输出正确可运行的代码。注意：每一步都要检查中间结果是否为空。"
+                elif iteration >= 2:
+                    hint = f"已失败 {iteration + 1} 次，只剩 {remaining} 次机会。请换一种思路，注意检查每个中间步骤的返回值是否为空。"
+                else:
+                    hint = "请仔细分析错误，检查每个中间步骤的返回值，修正代码后重新输出。"
+
+                error_msg = self._format_error_feedback(
+                    error=result.error or "未知错误",
+                    code=code,
+                    hint=hint,
+                )
 
                 full_messages.append({"role": "assistant", "content": raw})
-                full_messages.append({"role": "system", "content": error_msg})
+                full_messages.append({"role": "user", "content": error_msg})
                 continue
 
+            # ===== Step 4: 纯文本回答 =====
             return Envelop(receiver="user", payload={"ok": True, "data": raw})
 
-        return Envelop(receiver="user", payload={"ok": False, "error": f"达到最大迭代次数 ({max_iterations})，任务未完成"})
+        return Envelop(
+            receiver="user",
+            payload={
+                "ok": False,
+                "error": f"达到最大迭代次数 ({max_iterations})，任务未完成。请简化需求或手动处理。",
+            },
+        )
 
-    def _build_messages(self, messages: List[Dict[str, Any]], role: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _build_messages(
+        self, messages: List[Dict[str, Any]], role: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         if not self._system_prompt:
             return list(messages)
         return [{"role": role or "system", "content": self._system_prompt}, *messages]

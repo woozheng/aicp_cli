@@ -179,6 +179,7 @@ class HttpxClient(HttpClient):
         try:
             response = httpx.post(url, json=payload, headers=headers, timeout=self._timeout)
             response.raise_for_status()
+            response.encoding = 'utf-8'
             return response.json()
         except httpx.HTTPStatusError as exc:
             logger.error("HTTP %d calling %s: %s", exc.response.status_code, url, exc)
@@ -338,9 +339,9 @@ class ChatCLI:
             response = self._engine.send(stripped)
 
             if response.success:
-                print(f"\r🤖 {response.content}")
+                sys.stdout.buffer.write(f"🤖 {response.content}\n".encode('utf-8'))
             else:
-                print(f"\r❌ {response.error}")
+                sys.stdout.buffer.write(f"❌ {response.error}\n".encode('utf-8'))
             print()
 
     def _setup_signal_handlers(self) -> None:
@@ -445,6 +446,11 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
 
 
 def main() -> None:
+    # 全局 UTF-8，解决 Windows 终端中文乱码
+    if sys.platform == 'win32':
+        sys.stdout.reconfigure(encoding='utf-8', errors='ignore')
+        sys.stderr.reconfigure(encoding='utf-8', errors='ignore')
+
     args = parse_args(sys.argv)
     setup_logging(verbose=args["verbose"])
     logger.info(
