@@ -86,6 +86,17 @@ AICP_SYSTEM_PROMPT: str = """## 你是 AICP 协议运行时。你不是助手，
 
 2. 需要执行操作时 — 直接写 Python 代码，用代码块包裹，禁止模拟工具调用，直接写代码执行
 【重要1】其中必须实现函数签名 async def execute(envelop, agent):
+⚠️ async def execute 函数内使用的所有模块，import 必须写在函数内部第一行，不要写在文件顶部。
+async def 在编译时闭包已固定，顶部 import 在函数内无法访问。
+错误示例:
+import time
+async def execute(envelop, agent):
+    time.sleep(1)  # NameError: name 'time' is not defined
+
+正确示例:
+async def execute(envelop, agent):
+    import time
+    time.sleep(1)
   中间是代码逻辑
 【重要2】返回必须是  return {"data": "输出你的结果"}
 系统会自动调用 execute(envelop, agent)
@@ -171,50 +182,61 @@ Playwright 注意事项：
 
 
 # ============================================================================
-# 端点配置与远端能力收集
+# 端点配置 — 统一加载与声明
 # ============================================================================
 
 REMOTE_CAPS_CACHE_TTL: float = 300.0
 
 
 @dataclass
-class RemoteNode:
+class Endpoint:
+    """统一端点描述"""
     name: str
     url: str
     token: str
+    type: str = "aicp"          # "aicp" | "api"
     tags: List[str] = field(default_factory=list)
+    description: str = ""
+    usage: str = ""
 
 
-def _load_endpoints_config(config: Dict[str, Any]) -> List[RemoteNode]:
+def _load_endpoints_config(config: Dict[str, Any]) -> List[Endpoint]:
+    """加载 endpoints.yaml，返回统一端点列表"""
     endpoints_path = config.get("endpoints_config", "")
     if not endpoints_path:
         default_path = Path(__file__).parent.parent / "endpoints.yaml"
-        if default_path.exists():
-            endpoints_path = str(default_path)
-        else:
-            return []
+        endpoints_path = str(default_path) if default_path.exists() else ""
 
-    path = Path(endpoints_path)
-    if not path.exists():
+    if not endpoints_path or not Path(endpoints_path).exists():
         return []
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = _yaml.safe_load(f) if path.suffix in (".yaml", ".yml") else json.load(f)
+        with open(endpoints_path, "r", encoding="utf-8") as f:
+            if Path(endpoints_path).suffix in (".yaml", ".yml"):
+                data = _yaml.safe_load(f)
+            else:
+                data = json.load(f)
     except Exception:
-        logger.warning("无法加载端点配置文件: %s", path)
+        logger.warning("无法加载端点配置文件: %s", endpoints_path)
         return []
 
-    return [
-        RemoteNode(
+    endpoints = []
+    for ep in data.get("endpoints", []):
+        endpoints.append(Endpoint(
             name=ep.get("name", "unknown"),
             url=ep.get("url", ""),
             token=ep.get("token", ""),
+            type=ep.get("type", "aicp"),
             tags=ep.get("tags", []),
-        )
-        for ep in data.get("endpoints", [])
-    ]
+            description=ep.get("description", ""),
+            usage=ep.get("usage", ""),
+        ))
+    return endpoints
 
+
+# ============================================================================
+# 本地能力摘要
+# ============================================================================
 
 def _build_local_capability_summary(config: Dict[str, Any]) -> str:
     system = platform.system()
@@ -227,7 +249,12 @@ def _build_local_capability_summary(config: Dict[str, Any]) -> str:
     ])
 
 
-def _format_capability_for_llm(name: str, url: str, caps: dict) -> str:
+# ============================================================================
+# AICP 端点探测（仅 type: aicp）
+# ============================================================================
+
+def _format_aicp_capability(name: str, url: str, caps: dict) -> str:
+    """将 AICP 端点探测结果格式化为 LLM 可读的能力描述"""
     parts = [f"- **{name}**", f"  URL: {url}"]
 
     code_exec = caps.get("tools", {}).get("code_execution", False)
@@ -246,28 +273,32 @@ def _format_capability_for_llm(name: str, url: str, caps: dict) -> str:
         parts.append("  - 外网访问: ❌")
 
     models = caps.get("llm", {}).get("models", caps.get("models", []))
-    parts.append(f"  - LLM推理: ✅ ({', '.join(models)})" if models else "  - LLM推理: ✅ (具体能力未知)")
+    if models:
+        parts.append(f"  - LLM推理: ✅ ({', '.join(models)})")
+    else:
+        parts.append("  - LLM推理: ✅ (具体能力未知)")
 
     supports_vision = caps.get("llm", {}).get("supports_vision", False)
     parts.append(f"  - 图片分析: {'✅' if supports_vision else '❌'}")
 
     gpu = caps.get("compute", caps.get("gpu", {}))
     if gpu.get("gpu", gpu.get("available", False)):
-        model = gpu.get("gpu_model", gpu.get("model", "GPU"))
-        parts.append(f"  - GPU: ✅ ({model})")
+        parts.append(f"  - GPU: ✅ ({gpu.get('gpu_model', gpu.get('model', 'GPU'))})")
     else:
         parts.append("  - GPU: ❌")
 
     return "\n".join(parts)
 
 
-async def _collect_remote_capabilities(endpoints: List[RemoteNode]) -> str:
-    if not endpoints:
-        print("[REMOTE CAPS] 无端点配置")
+async def _probe_aicp_endpoints(endpoints: List[Endpoint]) -> str:
+    """探测 AICP 协议端点，返回能力描述"""
+    aicp_eps = [ep for ep in endpoints if ep.type == "aicp"]
+    if not aicp_eps:
+        print("[ENDPOINT] 无 AICP 端点")
         return ""
 
-    remote_infos = []
-    for ep in endpoints:
+    results = []
+    for ep in aicp_eps:
         try:
             resp = _requests.post(
                 ep.url,
@@ -277,67 +308,100 @@ async def _collect_remote_capabilities(endpoints: List[RemoteNode]) -> str:
             )
             if resp.status_code == 200:
                 caps = resp.json().get("data", {})
-                print(f"[REMOTE CAPS] {ep.name} 探测成功: {json.dumps(caps, ensure_ascii=False)}")
-                remote_infos.append(_format_capability_for_llm(ep.name, ep.url, caps))
+                print(f"[ENDPOINT] {ep.name} 探测成功: {json.dumps(caps, ensure_ascii=False)}")
+                results.append(_format_aicp_capability(ep.name, ep.url, caps))
             else:
-                print(f"[REMOTE CAPS] {ep.name} 返回非200: {resp.status_code}, 跳过")
+                print(f"[ENDPOINT] {ep.name} 返回 {resp.status_code}, 跳过")
         except Exception as e:
-            print(f"[REMOTE CAPS] {ep.name} 探测失败: {e}, 跳过")
+            print(f"[ENDPOINT] {ep.name} 探测失败: {e}")
 
-    if not remote_infos:
-        print("[REMOTE CAPS] 无可用远端节点")
-    else:
-        print(f"[REMOTE CAPS] 共 {len(remote_infos)} 个远端节点可用")
-
-    return "\n".join(remote_infos)
+    if results:
+        print(f"[ENDPOINT] 共 {len(results)} 个 AICP 端点可用")
+    return "\n".join(results)
 
 
+def _build_aicp_section(aicp_list: str, endpoints: List[Endpoint]) -> str:
+    aicp_eps = [ep for ep in endpoints if ep.type == "aicp"]
+    if not aicp_eps:
+        return ""
 
-def _build_capability_section(local_summary: str, remote_list: str, endpoints: List[RemoteNode]) -> str:
     lines = [
-        "【本地与远端能力对比】",
+        "## AICP 协议端点（可执行代码、操作文件、搜索等）",
         "",
-        "## 本地能力",
-        "本地已具备的能力，优先使用，无需调远端：",
-        local_summary,
+        aicp_list,
         "",
-        "## 远端能力节点（仅本地无法完成时使用）",
-        "以下远端节点作为补充，仅当本地能力不足时调用：",
-        "",
-        remote_list,
-        "",
-        "## 远端节点连接信息（代码中直接使用以下URL和Token）",
-        "",
+        "### 连接信息与调用方式",
     ]
-
-    for ep in endpoints:
+    for ep in aicp_eps:
         lines.append(f"- **{ep.name}**: URL={ep.url}, Token={ep.token}")
+        if ep.usage:
+            lines.append(f"  {ep.usage}")
+        lines.append("")
 
     lines.extend([
-        "",
-        "调用方式（直接复制修改）：",
-        "~~~python",
-        "import requests",
-        "",
-        "resp = requests.post(",
-        '    "http://127.0.0.1:9000/api/builtins/aicp/chat",',
-        '    headers={"Authorization": "Bearer sk-your-token-here"},',
-        "    json={",
-        '        "messages": [',
-        '            {"role": "user", "content": "请分析特斯拉2024年Q3财报，只返回JSON格式"}',
-        "        ]",
-        "    }",
-        ")",
-        'result = resp.json().get("data", "")',
-        "~~~",
-        "",
-        "【调用规则】",
+        "调用规则：",
         "1. 优先用本地能力：文件操作、run、本地模型推理等直接用",
-        "2. 本地无法满足时再调远端，选最匹配的一个节点，不要重复调多个",
+        "2. 本地无法满足时再调远端，选最匹配的一个节点",
         "3. 远端也无法满足时，用你的知识写代码调用公开免费API",
-        "4. 调用远端时Token必须从上面列出的真实Token复制，禁止用占位符",
+        "4. 调用远端时Token必须从上面列出的真实Token复制",
     ])
     return "\n".join(lines)
+
+
+# ============================================================================
+# 外部 API 声明（仅 type: api，不探测，直接读配置）
+# ============================================================================
+
+def _build_api_section(endpoints: List[Endpoint]) -> str:
+    """构建外部 API 的 prompt 声明"""
+    api_eps = [ep for ep in endpoints if ep.type == "api"]
+    if not api_eps:
+        return ""
+
+    lines = [
+        "## 外部 API 端点（已配置，可直接调用）",
+        "",
+    ]
+    for ep in api_eps:
+        lines.append(f"### {ep.name}")
+        if ep.description:
+            lines.append(ep.description)
+        lines.append(f"URL: {ep.url}")
+        if ep.token:
+            lines.append(f"Token: {ep.token}")
+        if ep.usage:
+
+            lines.append("⚠️ 必须严格按以下格式调用，不要修改任何字段名：")
+            lines.append(f"```\n{ep.usage.strip()}\n```")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+# ============================================================================
+# 统一构建远端能力段落
+# ============================================================================
+
+async def _build_remote_section(config: Dict[str, Any]) -> str:
+    """构建完整的远端能力段落"""
+    endpoints = _load_endpoints_config(config)
+    if not endpoints:
+        return ""
+
+    aicp_list = await _probe_aicp_endpoints(endpoints)
+    aicp_section = _build_aicp_section(aicp_list, endpoints) if aicp_list else ""
+    api_section = _build_api_section(endpoints)
+    print(f"[app_gen] api_section length={len(api_section)}, has pexels={'pexels' in api_section.lower()}")
+    parts = []
+    if aicp_section:
+        parts.append(aicp_section)
+    if api_section:
+        parts.append(api_section)
+    if not parts:
+        return ""
+
+    header = "【远端能力节点 — 当本地能力不足时使用】\n\n"
+    return header + "\n\n".join(parts)
 
 
 # ============================================================================
@@ -413,7 +477,6 @@ class CodeExecutor:
 
     async def _auto_install_module(self, error_msg: str) -> bool:
         """尝试自动安装缺失的模块，成功返回 True"""
-        module_name = error_msg.split("'")[1] if "'" in error_msg else error_msg
         try:
             install_msg = await self._agent.llm.chat([
                 {
@@ -474,7 +537,6 @@ class CodeExecutor:
         else:
             data = str(result)
 
-        # 检查明显的失败信号
         if data and isinstance(data, str):
             failure_keywords = ("LLM请求失败", "系统错误", "bytes is not JSON serializable")
             if any(kw in data for kw in failure_keywords):
@@ -535,7 +597,6 @@ def _detect_environment(config: Dict[str, Any]) -> str:
     is_macos = system == "Darwin"
     is_linux = system == "Linux"
 
-    # 工具检测
     has_playwright = False
     has_docker = False
     has_git = False
@@ -567,7 +628,6 @@ def _detect_environment(config: Dict[str, Any]) -> str:
         except Exception:
             pass
 
-    # 网络检测
     can_access_foreign = False
     can_access_domestic = False
     try:
@@ -586,7 +646,6 @@ def _detect_environment(config: Dict[str, Any]) -> str:
     else:
         network_hint = "当前网络受限，尽量使用远端API"
 
-    # 内存
     memory_gb = 0.0
     try:
         import psutil
@@ -701,23 +760,16 @@ class AICP_LLM:
             and now - AICP_LLM._cached_remote_ts < REMOTE_CAPS_CACHE_TTL
         ):
             remaining = REMOTE_CAPS_CACHE_TTL - (now - AICP_LLM._cached_remote_ts)
-            print(f"[REMOTE CAPS] 命中缓存 (TTL剩余 {remaining:.0f}s)，跳过网络探测")
+            print(f"[REMOTE CAPS] 命中缓存 (TTL剩余 {remaining:.0f}s)")
             remote_section = AICP_LLM._cached_remote_section
         else:
-            print("[REMOTE CAPS] 开始收集远端能力...")
-            endpoints = _load_endpoints_config(self._config)
-            print(f"[REMOTE CAPS] 加载到 {len(endpoints)} 个端点")
-            remote_list = await _collect_remote_capabilities(endpoints)
-            if remote_list:
-                local_summary = _build_local_capability_summary(self._config)
-                remote_section = _build_capability_section(local_summary, remote_list, endpoints)
-            else:
-                remote_section = ""
+            print("[REMOTE CAPS] 构建远端能力声明...")
+            remote_section = await _build_remote_section(self._config)
             AICP_LLM._cached_remote_section = remote_section
             AICP_LLM._cached_remote_ts = now
-            print("[REMOTE CAPS] 远端能力收集完成，已注入 system prompt")
+            print("[REMOTE CAPS] 远端能力声明已注入 system prompt")
 
-        self._system_prompt = self._system_prompt.replace("{remote_section}", remote_section)
+        self._system_prompt = self._system_prompt.replace("{remote_section}", remote_section or "")
         self._remote_caps_ready = True
 
     async def _ensure_remote_capabilities(self):
@@ -746,7 +798,6 @@ class AICP_LLM:
         full_messages = self._build_messages(messages, role)
 
         for iteration in range(max_iterations):
-            # ===== Step 1: 调用 LLM =====
             try:
                 if stream:
                     raw = ""
@@ -776,7 +827,6 @@ class AICP_LLM:
             if not raw:
                 return Envelop(receiver="user", payload={"ok": True, "data": ""})
 
-            # ===== Step 2: 尝试 Envelop 路由 =====
             protocol = self._parser.extract_envelop(raw)
             if protocol is not None:
                 try:
@@ -790,8 +840,9 @@ class AICP_LLM:
                         "content": f"执行失败: {type(exc).__name__}: {str(exc)}，请直接写代码完成原始需求。",
                     })
                     continue
-
-            # ===== Step 3: 尝试代码执行 =====
+            # 在 raw 获取之后、处理之前加
+            raw_log = LOG_DIR / f"llm_raw_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:18]}.txt"
+            raw_log.write_text(raw, encoding="utf-8")
             code = self._parser.extract_code_block(raw)
             if code is not None:
                 try:
@@ -806,7 +857,6 @@ class AICP_LLM:
                 if result.ok:
                     return Envelop(receiver="user", payload=result.to_dict())
 
-                # 保存错误日志
                 error_log = LOG_DIR / (
                     f"code_error_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S_%f')[:18]}.py"
                 )
@@ -821,7 +871,6 @@ class AICP_LLM:
                     iteration + 1, max_iterations, result.error, error_log,
                 )
 
-                # 构造错误反馈
                 remaining = max_iterations - iteration - 1
                 if remaining <= 0:
                     hint = "这是最后一次尝试，请务必输出正确可运行的代码。注意：每一步都要检查中间结果是否为空。"
@@ -840,7 +889,6 @@ class AICP_LLM:
                 full_messages.append({"role": "user", "content": error_msg})
                 continue
 
-            # ===== Step 4: 纯文本回答 =====
             return Envelop(receiver="user", payload={"ok": True, "data": raw})
 
         return Envelop(

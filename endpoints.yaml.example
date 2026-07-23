@@ -1,8 +1,47 @@
 endpoints:
-  - name: "办公网节点"
+  # ===== AICP 协议端点 =====
+  - name: "本地 Agent"
+    type: aicp
     url: "http://127.0.0.1:9000/api/builtins/aicp/chat"
-    token: "testtoken"
-    tags:
-      - "搜索"
-      - "国内网络"
-      - "代码执行"
+    token: ""
+    description: "AICP 协议运行时，可根据需求返回数据结果。需求要清晰，格式要准确。"
+    usage: |
+      curl -X POST {url} \
+        -H "Authorization: Bearer {token}" \
+        -H "Content-Type: application/json" \
+        -d '{{"messages":[{{"role":"user","content":"你的需求和要求返回格式"}}]}}'
+      
+      返回: {{"ok":true,"data":"结果"}}
+
+
+  - name: "商汤信息图生成"
+    type: api  
+    url: "https://token.sensenova.cn/v1/images/generations"
+    token: ""
+    description: "此端点根据详细数据生成信息图。将文字报告、数据分析转成可视化信息图表。适合做报表、流程图、知识卡片。必须传入结构化详细数据，不适合画人物或风景。"
+    usage: |
+      触发词：信息图、流程图、报表、知识卡片、图表、思维导图、架构图。
+      当用户需求包含以上任意关键词时，优先使用此端点，不要用 Canvas 手绘。
+      普通生成图片，绘画、游戏、动画请用 Canvas，不要调此 API。
+      本api没有详细推理能力，必须先根据用户需求生成详细数据，再调用此 API。
+      curl -X POST {url} \
+        -H "Authorization: Bearer {token}" \
+        -H "Content-Type: application/json" \
+        -d '{{"model":"sensenova-u1-fast","prompt":"必须是详细信息数据","size":"2752x1536","n":1}}'
+      
+      返回: {{"data":[{{"url":"https://..."}}]}}
+      图片URL: data[0].url（有效期1小时，需下载）
+      可选size: 1664x2496(2:3) 2496x1664(3:2) 1760x2368(3:4) 2368x1760(4:3) 1824x2272(4:5) 2272x1824(5:4) 2048x2048(1:1) 2752x1536(16:9) 1536x2752(9:16) 3072x1376(21:9) 1344x3136(9:21)
+        
+
+  - name: "Pexels 图片搜索"
+    type: api
+    url: "https://api.pexels.com/v1/search"
+    token: ""
+    description: "根据{关键词}搜索免费图片（非生成），返回图片列表。query: 搜索关键词, per_page: 返回数量(默认10)。适合内容配图、"
+    usage: |
+      curl -X GET "{url}?query={关键词}&per_page=10" \
+        -H "Authorization: Bearer {token}"
+      
+      返回: {{"photos":[{{"src":{{"medium":"图片URL"}},"photographer":"作者","alt":"描述"}}]}}
+      图片URL: photos[0].src.medium
