@@ -22,6 +22,7 @@ Thumbs.db
 # Logs
 logs/
 *.log
+data/
 
 # Config (keep template, ignore real)
 aicp.yaml

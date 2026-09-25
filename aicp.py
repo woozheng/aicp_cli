@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
-AICP CLI — Production-grade command-line interface.
+AICP CLI — 极简命令行接口。
 
-Provides both local and remote chat modes with robust error handling,
-comprehensive logging, and clean architecture.
+模式:
+  python cli.py               本地模式（直接调用 AICP 引擎，endpoints.yaml 中非 studio 端点作为能力补充）
+  python cli.py -r            远端模式（完全依赖远端节点，从 endpoints.yaml 读取）
+  python cli.py --studio      Studio 模式（连接 main_agent，使用 content 格式，session_id 由 token 决定）
 """
 
 from __future__ import annotations
@@ -36,13 +38,9 @@ except ImportError:
 from runtime._config import load_config
 from runtime._aicp_llm import AICP_LLM
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 DEFAULT_CONFIG_PATH: Path = Path(__file__).resolve().parent / "aicp.yaml"
 DEFAULT_ENDPOINTS_PATH: Path = Path(__file__).resolve().parent / "endpoints.yaml"
-DEFAULT_TIMEOUT_SECONDS: int = 120
+DEFAULT_TIMEOUT_SECONDS: int = 300
 EXIT_COMMANDS: frozenset[str] = frozenset({"/exit", "/quit", "exit"})
 
 logger = logging.getLogger("aicp.cli")
@@ -52,38 +50,23 @@ def setup_logging(verbose: bool = False) -> None:
     level = logging.DEBUG if verbose else logging.WARNING
     handler = logging.StreamHandler(sys.stderr)
     handler.setFormatter(
-        logging.Formatter(
-            "[%(asctime)s] %(levelname)-8s %(name)s | %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S",
-        )
+        logging.Formatter("[%(asctime)s] %(levelname)-8s %(name)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
     )
     logger.setLevel(level)
     logger.addHandler(handler)
     logger.propagate = False
 
 
-# ---------------------------------------------------------------------------
-# Terminal spinner
-# ---------------------------------------------------------------------------
-
-def _show_progress(stop_event, retry_count=0):
+def _show_progress(stop_event: threading.Event) -> None:
     frames = ['|', '/', '-', '\\']
     i = 0
     while not stop_event.is_set():
-        msg = f"\r⏳ {frames[i % len(frames)]}"
-        if retry_count > 0:
-            msg += f" (重试 {retry_count}/5)"
-        sys.stdout.write(msg + " ")
+        sys.stdout.write(f"\r⏳ {frames[i % len(frames)]} ")
         sys.stdout.flush()
         i += 1
         time.sleep(0.1)
     sys.stdout.write("\r" + " " * 30 + "\r")
     sys.stdout.flush()
-
-
-# ---------------------------------------------------------------------------
-# Data models
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -92,8 +75,8 @@ class RemoteConfig:
     token: str = ""
 
     @classmethod
-    def from_endpoints_config(cls, config: Dict[str, Any], node_name: Optional[str] = None) -> Optional[RemoteConfig]:
-        """从 endpoints.yaml 读取远端节点配置"""
+    def from_endpoints_config(cls, config: Dict[str, Any], node_name: Optional[str] = None,
+                              exclude_studio: bool = False, prefer_studio: bool = False) -> Optional[RemoteConfig]:
         endpoints_path = config.get("endpoints_config", "")
         if not endpoints_path:
             if DEFAULT_ENDPOINTS_PATH.exists():
@@ -106,7 +89,7 @@ class RemoteConfig:
             return None
 
         if _yaml is None:
-            logger.error("PyYAML is required to read endpoints config. Install it with: pip install pyyaml")
+            logger.error("PyYAML is required to read endpoints config. Install: pip install pyyaml")
             return None
 
         try:
@@ -120,15 +103,22 @@ class RemoteConfig:
         if not endpoints:
             return None
 
-        for ep in endpoints:
-            if node_name is None or ep.get("name") == node_name:
-                return cls(
-                    endpoint=ep.get("url", ""),
-                    token=ep.get("token", ""),
-                )
+        if exclude_studio:
+            endpoints = [ep for ep in endpoints if "studio" not in ep.get("name", "").lower()]
 
         if node_name:
-            logger.warning("Node '%s' not found in endpoints.yaml, using first available", node_name)
+            for ep in endpoints:
+                if ep.get("name") == node_name:
+                    return cls(endpoint=ep.get("url", ""), token=ep.get("token", ""))
+            logger.warning("Node '%s' not found", node_name)
+            return None
+
+        if prefer_studio:
+            for ep in endpoints:
+                if "studio" in ep.get("name", "").lower():
+                    return cls(endpoint=ep.get("url", ""), token=ep.get("token", ""))
+
+        if endpoints:
             ep = endpoints[0]
             return cls(endpoint=ep.get("url", ""), token=ep.get("token", ""))
 
@@ -153,11 +143,7 @@ class ChatResponse:
 class ChatMode(Enum):
     LOCAL = "local"
     REMOTE = "remote"
-
-
-# ---------------------------------------------------------------------------
-# HTTP client abstraction
-# ---------------------------------------------------------------------------
+    STUDIO = "studio"
 
 
 class HttpClient(ABC):
@@ -169,7 +155,7 @@ class HttpClient(ABC):
 class HttpxClient(HttpClient):
     def __init__(self, timeout: int = DEFAULT_TIMEOUT_SECONDS) -> None:
         if httpx is None:
-            raise ImportError("httpx is required for remote mode. Install it with: pip install httpx")
+            raise ImportError("httpx is required for remote mode. Install: pip install httpx")
         self._timeout = timeout
 
     def post_json(self, url: str, payload: Dict[str, Any], token: str = "") -> Dict[str, Any]:
@@ -230,11 +216,6 @@ def create_http_client() -> HttpClient:
     return StdlibHttpClient()
 
 
-# ---------------------------------------------------------------------------
-# Chat engines
-# ---------------------------------------------------------------------------
-
-
 class ChatEngine(ABC):
     @abstractmethod
     def send(self, user_message: str) -> ChatResponse:
@@ -244,34 +225,6 @@ class ChatEngine(ABC):
     @abstractmethod
     def banner(self) -> str:
         ...
-
-
-class RemoteChatEngine(ChatEngine):
-    def __init__(self, config: RemoteConfig, http: HttpClient) -> None:
-        self._endpoint = config.endpoint
-        self._token = config.token
-        self._http = http
-
-    @property
-    def banner(self) -> str:
-        return f"=== AICP 远端模式 | {self._endpoint} | /exit 退出 ===\n"
-
-    def send(self, user_message: str) -> ChatResponse:
-        stop = threading.Event()
-        t = threading.Thread(target=_show_progress, args=(stop,), daemon=True)
-        t.start()
-        try:
-            raw = self._http.post_json(
-                self._endpoint,
-                {"messages": [{"role": "user", "content": user_message}]},
-                self._token,
-            )
-        finally:
-            stop.set()
-            t.join(timeout=0.5)
-        if raw.get("ok"):
-            return ChatResponse.ok(raw.get("data", ""))
-        return ChatResponse.fail(raw.get("error", "未知错误"))
 
 
 class LocalChatEngine(ChatEngine):
@@ -293,7 +246,7 @@ class LocalChatEngine(ChatEngine):
             result = asyncio.run(
                 self._aicp.chatEnvelop(
                     [{"role": "user", "content": user_message}],
-                    stream=self._stream
+                    stream=self._stream,
                 )
             )
         except Exception as exc:
@@ -303,14 +256,70 @@ class LocalChatEngine(ChatEngine):
             stop.set()
             if t is not None:
                 t.join(timeout=0.5)
+
         if result.payload.get("ok"):
             return ChatResponse.ok(result.payload.get("data", ""))
         return ChatResponse.fail(result.payload.get("error", "未知错误"))
 
 
-# ---------------------------------------------------------------------------
-# CLI loop
-# ---------------------------------------------------------------------------
+class RemoteChatEngine(ChatEngine):
+    def __init__(
+        self,
+        config: RemoteConfig,
+        http: HttpClient,
+        studio_mode: bool = False,
+    ) -> None:
+        self._url = config.endpoint
+        self._token = config.token
+        self._http = http
+        self._studio_mode = studio_mode
+        # ✅ token 固定 → session_id 固定，main_agent 能恢复会话
+        self._session_id = config.token or "cli_default"
+
+    @property
+    def banner(self) -> str:
+        if self._studio_mode:
+            session_display = self._session_id[:8] + "..." if len(self._session_id) > 8 else self._session_id
+            return f"=== AICP Studio 模式 (main_agent) | session={session_display} | /exit 退出 ===\n"
+        return f"=== AICP 远端模式 | {self._url} | /exit 退出 ===\n"
+
+    def send(self, user_message: str) -> ChatResponse:
+        stop = threading.Event()
+        t = threading.Thread(target=_show_progress, args=(stop,), daemon=True)
+        t.start()
+        try:
+            if self._studio_mode:
+                payload = {
+                    "content": user_message,
+                    "session_id": self._session_id,
+                    "channel": "cli",
+                }
+            else:
+                payload = {"messages": [{"role": "user", "content": user_message}]}
+
+            raw = self._http.post_json(self._url, payload, self._token)
+        finally:
+            stop.set()
+            t.join(timeout=0.5)
+
+        # studio 模式：main_agent 返回 {"type": "chat", "content": "..."}
+        if self._studio_mode:
+            if "error" in raw:
+                return ChatResponse.fail(raw.get("error", "未知错误"))
+            if "content" in raw:
+                return ChatResponse.ok(raw["content"])
+            if "message" in raw:
+                return ChatResponse.ok(raw["message"])
+            if "data" in raw:
+                return ChatResponse.ok(raw["data"])
+            if raw:
+                return ChatResponse.ok(json.dumps(raw, ensure_ascii=False))
+            return ChatResponse.fail("无响应")
+
+        # 非 studio 模式：标准格式
+        if raw.get("ok"):
+            return ChatResponse.ok(raw.get("message", raw.get("data", "")))
+        return ChatResponse.fail(raw.get("error", "未知错误"))
 
 
 class ChatCLI:
@@ -339,9 +348,9 @@ class ChatCLI:
             response = self._engine.send(stripped)
 
             if response.success:
-                sys.stdout.buffer.write(f"🤖 {response.content}\n".encode('utf-8'))
+                sys.stdout.buffer.write(f"🤖 {response.content}\n".encode("utf-8"))
             else:
-                sys.stdout.buffer.write(f"❌ {response.error}\n".encode('utf-8'))
+                sys.stdout.buffer.write(f"❌ {response.error}\n".encode("utf-8"))
             print()
 
     def _setup_signal_handlers(self) -> None:
@@ -359,11 +368,6 @@ class ChatCLI:
     def _shutdown(message: str) -> None:
         print(f"\n{message}")
         logger.info("CLI session ended")
-
-
-# ---------------------------------------------------------------------------
-# Application factory
-# ---------------------------------------------------------------------------
 
 
 class Application:
@@ -394,23 +398,24 @@ class Application:
         if self._mode == ChatMode.REMOTE:
             remote_cfg = RemoteConfig.from_endpoints_config(self._config, self._node_name)
             if remote_cfg is None:
-                logger.critical(
-                    "Remote mode selected but no endpoints found in endpoints.yaml. "
-                    "Please create endpoints.yaml with at least one endpoint."
-                )
+                logger.critical("Remote mode requires an endpoint in endpoints.yaml. Use -n to specify one.")
                 sys.exit(1)
-            return RemoteChatEngine(remote_cfg, create_http_client())
+            return RemoteChatEngine(remote_cfg, create_http_client(), studio_mode=False)
+
+        if self._mode == ChatMode.STUDIO:
+            remote_cfg = RemoteConfig.from_endpoints_config(self._config, self._node_name, prefer_studio=True)
+            if remote_cfg is None:
+                logger.critical("Studio mode requires a studio endpoint in endpoints.yaml. Use -n to specify one.")
+                sys.exit(1)
+            return RemoteChatEngine(remote_cfg, create_http_client(), studio_mode=True)
+
         return LocalChatEngine(self._config, stream=self._stream)
 
 
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
-
-
 def parse_args(argv: List[str]) -> Dict[str, Any]:
-    flags = {
+    flags: Dict[str, Any] = {
         "remote": False,
+        "studio": False,
         "verbose": False,
         "stream": True,
         "config": str(DEFAULT_CONFIG_PATH),
@@ -421,9 +426,11 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
         arg = argv[i]
         if arg in ("-r", "--remote"):
             flags["remote"] = True
+        elif arg in ("-s", "--studio"):
+            flags["studio"] = True
         elif arg in ("-v", "--verbose"):
             flags["verbose"] = True
-        elif arg in ("--no-stream",):
+        elif arg == "--no-stream":
             flags["stream"] = False
         elif arg in ("-n", "--node"):
             if i + 1 < len(argv):
@@ -440,24 +447,26 @@ def parse_args(argv: List[str]) -> Dict[str, Any]:
     return flags
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
-    # 全局 UTF-8，解决 Windows 终端中文乱码
-    if sys.platform == 'win32':
-        sys.stdout.reconfigure(encoding='utf-8', errors='ignore')
-        sys.stderr.reconfigure(encoding='utf-8', errors='ignore')
+    if sys.platform == "win32":
+        sys.stdout.reconfigure(encoding="utf-8", errors="ignore")
+        sys.stderr.reconfigure(encoding="utf-8", errors="ignore")
 
     args = parse_args(sys.argv)
     setup_logging(verbose=args["verbose"])
+
+    if args["studio"]:
+        mode = ChatMode.STUDIO
+    elif args["remote"]:
+        mode = ChatMode.REMOTE
+    else:
+        mode = ChatMode.LOCAL
+
     logger.info(
-        "Starting AICP CLI | config=%s | remote=%s | node=%s | stream=%s",
-        args["config"], args["remote"], args["node"], args["stream"],
+        "Starting AICP CLI | config=%s | mode=%s | node=%s | stream=%s",
+        args["config"], mode.value, args["node"], args["stream"],
     )
-    mode = ChatMode.REMOTE if args["remote"] else ChatMode.LOCAL
+
     app = Application(
         Path(args["config"]),
         mode,
